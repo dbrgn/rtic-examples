@@ -3,6 +3,8 @@
 //! Note: The STM32L0 only has 16 bit timers. But we can link together two such
 //! timers to form a 32 bit timer.
 
+// TODO: Correctness / bounds docs for Instant / Duration
+
 use core::u32;
 use core::{
     cmp::Ordering,
@@ -10,30 +12,99 @@ use core::{
     fmt, ops,
 };
 use rtic::Monotonic;
-use stm32l0xx_hal::{self as hal, pac};
+use rtt_target::rprintln;
+use stm32l0xx_hal::{pac, timer::LinkedTimerPair};
 
-/// A measurement of the counter. Opaque and useful only with `Duration`
+/// Implementor of the `rtic::Monotonic` traits and used to consume the timer
+/// to not allow for erroneous configuration.
 ///
-/// # Correctness
-///
-/// Adding or subtracting a `Duration` of more than `(1 << 31)` cycles to an `Instant` effectively
-/// makes it "wrap around" and creates an incorrect value. This is also true if the operation is
-/// done in steps, e.g. `(instant + dur) + dur` where `dur` is `(1 << 30)` ticks.
+/// This uses TIM2/TIM3 internally as linked timers.
+pub struct LinkedTim2Tim3;
+
+impl LinkedTim2Tim3 {
+    /// Initialize the timer instance.
+    pub fn initialize(timer: LinkedTimerPair<pac::TIM2, pac::TIM3>) {
+        // Explicitly drop timer instance so it cannot be reused or reconfigured.
+        drop(timer);
+    }
+}
+
+impl Monotonic for LinkedTim2Tim3 {
+    type Instant = Instant;
+
+    fn ratio() -> rtic::Fraction {
+        // monotonic * fraction = sys clock
+        // TODO: Assumes both timer and sysclock clock run at 16 MHz
+        rtic::Fraction {
+            numerator: 1,
+            denominator: 1,
+        }
+    }
+
+    /// Returns the current time
+    ///
+    /// # Correctness
+    ///
+    /// This function is *allowed* to return nonsensical values if called before `reset` is invoked
+    /// by the runtime. Therefore application authors should *not* call this function during the
+    /// `#[init]` phase.
+    fn now() -> Self::Instant {
+        Instant::now()
+    }
+
+    /// Resets the counter to *zero*
+    ///
+    /// # Safety
+    ///
+    /// This function will be called *exactly once* by the RTFM runtime after `#[init]` returns and
+    /// before tasks can start; this is also the case in multi-core applications. User code must
+    /// *never* call this function.
+    unsafe fn reset() {
+        rprintln!("LinkedTim2Tim3::reset()");
+
+        let tim_msb = &*pac::TIM3::ptr();
+        let tim_lsb = &*pac::TIM2::ptr();
+
+        // Reset counter to 0
+        tim_msb.cnt.write(|w| w.cnt().bits(0));
+        tim_lsb.cnt.write(|w| w.cnt().bits(0));
+    }
+
+    fn zero() -> Self::Instant {
+        Instant { inner: 0 }
+    }
+}
+
+/// A measurement of the counter. Opaque and useful only with `Duration`.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct Instant {
-    inner: i32,
+    inner: u32,
 }
 
 impl Instant {
-    /// Returns an instant corresponding to "now"
+    /// Returns an instant corresponding to "now".
     pub fn now() -> Self {
-        let now = {
-            let timer = unsafe { &*target::TIMER1::ptr() };
-            timer.tasks_capture[0].write(|w| unsafe { w.bits(1) });
-            timer.cc[0].read().bits()
-        };
+        loop {
+            let tim_msb = unsafe { &*pac::TIM3::ptr() };
+            let tim_lsb = unsafe { &*pac::TIM2::ptr() };
 
-        Instant { inner: now as i32 }
+            let msb = tim_msb.cnt.read().cnt().bits() as u32;
+            let lsb = tim_lsb.cnt.read().cnt().bits() as u32;
+            let msb_again = tim_msb.cnt.read().cnt().bits() as u32;
+
+            rprintln!("msb {} lsb {} msba {}", msb, lsb, msb_again);
+
+            // Because the timer is still running at high frequency
+            // between reading MSB and LSB, it's possible that LSB
+            // has already overflowed. Therefore we read MSB again
+            // to check that it hasn't changed.
+            let msb_again = tim_msb.cnt.read().cnt().bits() as u32;
+            if msb == msb_again {
+                return Instant {
+                    inner: (msb << 16) | lsb,
+                };
+            }
+        }
     }
 
     /// Returns the amount of time elapsed since this instant was created.
@@ -43,14 +114,18 @@ impl Instant {
 
     /// Returns the underlying count
     pub fn counts(&self) -> u32 {
-        self.inner as u32
+        self.inner
     }
 
     /// Returns the amount of time elapsed from another instant to this one.
     pub fn duration_since(&self, earlier: Instant) -> Duration {
-        let diff = self.inner - earlier.inner;
-        assert!(diff >= 0, "second instant is later than self");
-        Duration { inner: diff as u32 }
+        assert!(
+            self.inner > earlier.inner,
+            "second instant is later than self"
+        );
+        Duration {
+            inner: self.inner - earlier.inner,
+        }
     }
 }
 
@@ -64,16 +139,12 @@ impl fmt::Debug for Instant {
 
 impl ops::AddAssign<Duration> for Instant {
     fn add_assign(&mut self, dur: Duration) {
-        // NOTE this is a debug assertion because there's no foolproof way to detect a wrap around;
-        // the user may write `(instant + dur) + dur` where `dur` is `(1<<31)-1` ticks.
-        debug_assert!(dur.inner < (1 << 31));
-        self.inner = self.inner.wrapping_add(dur.inner as i32);
+        self.inner = self.inner.wrapping_add(dur.inner);
     }
 }
 
 impl ops::Add<Duration> for Instant {
     type Output = Self;
-
     fn add(mut self, dur: Duration) -> Self {
         self += dur;
         self
@@ -82,24 +153,20 @@ impl ops::Add<Duration> for Instant {
 
 impl ops::SubAssign<Duration> for Instant {
     fn sub_assign(&mut self, dur: Duration) {
-        // NOTE see the NOTE in `<Instant as AddAssign<Duration>>::add_assign`
-        debug_assert!(dur.inner < (1 << 31));
-        self.inner = self.inner.wrapping_sub(dur.inner as i32);
+        self.inner = self.inner.wrapping_sub(dur.inner);
     }
 }
 
 impl ops::Sub<Duration> for Instant {
     type Output = Self;
-
     fn sub(mut self, dur: Duration) -> Self {
         self -= dur;
         self
     }
 }
 
-impl ops::Sub<Instant> for Instant {
+impl ops::Sub for Instant {
     type Output = Duration;
-
     fn sub(self, other: Instant) -> Duration {
         self.duration_since(other)
     }
@@ -107,7 +174,7 @@ impl ops::Sub<Instant> for Instant {
 
 impl Ord for Instant {
     fn cmp(&self, rhs: &Self) -> Ordering {
-        self.inner.wrapping_sub(rhs.inner).cmp(&0)
+        self.inner.cmp(&rhs.inner)
     }
 }
 
@@ -118,14 +185,6 @@ impl PartialOrd for Instant {
 }
 
 /// A `Duration` type to represent a span of time.
-///
-/// This data type is only available on ARMv7-M
-///
-/// # Correctness
-///
-/// This type is *not* appropriate for representing time spans in the order of, or larger than,
-/// seconds because it can hold a maximum of `(1 << 31)` "ticks" where each tick is the inverse of
-/// the CPU frequency, which usually is dozens of MHz.
 #[derive(Clone, Copy, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Duration {
     inner: u32,
@@ -158,9 +217,8 @@ impl ops::AddAssign for Duration {
     }
 }
 
-impl ops::Add<Duration> for Duration {
+impl ops::Add for Duration {
     type Output = Self;
-
     fn add(self, other: Self) -> Self {
         Duration {
             inner: self.inner + other.inner,
@@ -170,7 +228,6 @@ impl ops::Add<Duration> for Duration {
 
 impl ops::Mul<u32> for Duration {
     type Output = Self;
-
     fn mul(self, other: u32) -> Self {
         Duration {
             inner: self.inner * other,
@@ -190,9 +247,8 @@ impl ops::SubAssign for Duration {
     }
 }
 
-impl ops::Sub<Duration> for Duration {
+impl ops::Sub for Duration {
     type Output = Self;
-
     fn sub(self, rhs: Self) -> Self {
         Duration {
             inner: self.inner - rhs.inner,
@@ -200,116 +256,35 @@ impl ops::Sub<Duration> for Duration {
     }
 }
 
-/// Adds the `secs`, `millis` and `micros` methods to the `u32` type
-///
-/// This trait is only available on ARMv7-M
-pub trait U32Ext {
-    /// Converts the `u32` value as seconds into ticks
-    fn secs(self) -> Duration;
-
-    /// Converts the `u32` value as milliseconds into ticks
-    fn millis(self) -> Duration;
-
-    /// Converts the `u32` value as microseconds into ticks
-    fn micros(self) -> Duration;
-}
-
-impl U32Ext for u32 {
-    fn secs(self) -> Duration {
-        self.millis() * 1_000
-    }
-
-    fn millis(self) -> Duration {
-        self.micros() * 1_000
-    }
-
-    fn micros(self) -> Duration {
-        let frac = Tim1::ratio();
-
-        // 64 MHz / fraction / 1_000_000
-        Duration {
-            inner: (64 * frac.denominator * self) / frac.numerator,
-        }
-    }
-}
-
-/// Implementor of the `rtic::Monotonic` traits and used to "eat" the timer to not allow for
-/// erroneous configuration
-pub struct LinkedTim2Tim3;
-
-impl Tim1 {
-    pub fn initialize(timer: target::TIMER1) {
-        // Auto restart, make sure the entire timer won't stop for any event
-        timer.shorts.write(|w| {
-            w.compare0_clear()
-                .enabled()
-                .compare0_stop()
-                .disabled()
-                .compare1_clear()
-                .enabled()
-                .compare1_stop()
-                .disabled()
-                .compare2_clear()
-                .enabled()
-                .compare2_stop()
-                .disabled()
-                .compare3_clear()
-                .enabled()
-                .compare3_stop()
-                .disabled()
-                .compare4_clear()
-                .enabled()
-                .compare4_stop()
-                .disabled()
-                .compare5_clear()
-                .enabled()
-                .compare5_stop()
-                .disabled()
-        });
-
-        // 1 MHz mode
-        timer.prescaler.write(|w| unsafe { w.prescaler().bits(4) });
-
-        // 32 bit mode
-        timer.bitmode.write(|w| w.bitmode()._32bit());
-
-        // Set compare value to max, not sure if this is needed
-        timer.cc[0].write(|w| unsafe { w.cc().bits(u32::MAX) });
-
-        // Clear the counter value
-        timer.tasks_clear.write(|w| unsafe { w.bits(1) });
-
-        // Start the timer
-        timer.tasks_start.write(|w| unsafe { w.bits(1) });
-
-        // Throw away the timer, it is now setup and consumed
-        drop(timer);
-    }
-}
-
-impl rtic::Monotonic for Tim1 {
-    type Instant = Instant;
-
-    fn ratio() -> rtic::Fraction {
-        // monotonic * fraction = sys clock
-        rtic::Fraction {
-            numerator: 64,
-            denominator: 1,
-        }
-    }
-
-    fn now() -> Self::Instant {
-        Instant::now()
-    }
-
-    unsafe fn reset() {
-        let timer = &*target::TIMER1::ptr();
-
-        // Clear the counter value
-        timer.tasks_clear.write(|w| w.bits(1));
-    }
-
-    fn zero() -> Self::Instant {
-        Instant { inner: 0 }
-    }
-}
+///// Adds the `secs`, `millis` and `micros` methods to the `u32` type
+/////
+///// This trait is only available on ARMv7-M
+//pub trait U32Ext {
+//    /// Converts the `u32` value as seconds into ticks
+//    fn secs(self) -> Duration;
+//
+//    /// Converts the `u32` value as milliseconds into ticks
+//    fn millis(self) -> Duration;
+//
+//    /// Converts the `u32` value as microseconds into ticks
+//    fn micros(self) -> Duration;
+//}
+//
+//impl U32Ext for u32 {
+//    fn secs(self) -> Duration {
+//        self.millis() * 1_000
+//    }
+//
+//    fn millis(self) -> Duration {
+//        self.micros() * 1_000
+//    }
+//
+//    fn micros(self) -> Duration {
+//        let frac = Tim1::ratio();
+//
+//        // 64 MHz / fraction / 1_000_000
+//        Duration {
+//            inner: (64 * frac.denominator * self) / frac.numerator,
+//        }
+//    }
+//}

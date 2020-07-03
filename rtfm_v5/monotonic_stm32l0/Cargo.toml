@@ -12,7 +12,8 @@ edition = "2018"
 cortex-m-rtic = "0.5.1"
 panic-rtt-target = { version = "0.1.0", features = ["cortex-m"] }
 rtt-target = { version = "0.2.0", features = ["cortex-m"] }
-stm32l0xx-hal = { version = "0.6", features = ["rt", "mcu-STM32L071KBTx"] }
+#stm32l0xx-hal = { version = "0.6", features = ["rt", "mcu-STM32L071KBTx"] }
+stm32l0xx-hal = { git = "https://github.com/gfroerli/stm32l0xx-hal/", branch = "linked-timers", features = ["rt", "mcu-STM32L071KBTx"] }
 
 # this lets you use `cargo fix`!
 [[bin]]

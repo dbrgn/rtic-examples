@@ -15,10 +15,10 @@ Install cargo-embed:
 
     cargo install cargo-embed
 
-Then:
+Adjust your MCU in `Embed.toml`:
 
-    cargo embed --release --chip <chip>
+    chip = "stm32l071kbtx"
 
-Example:
+Then, run:
 
-    cargo embed --release --chip stm32l071kbtx
+    cargo embed --release
