@@ -1,0 +1,11 @@
+[default.flashing]
+enabled = true
+restore_unwritten_bytes = false
+
+[default.general]
+chip = "stm32l071kbtx"
+log_level = "Debug"
+
+[default.rtt]
+enabled = true
+show_timestamps = true
