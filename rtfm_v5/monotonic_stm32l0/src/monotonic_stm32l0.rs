@@ -65,9 +65,15 @@ impl Monotonic for LinkedTim2Tim3 {
         let tim_msb = &*pac::TIM3::ptr();
         let tim_lsb = &*pac::TIM2::ptr();
 
-        // Reset counter to 0
-        tim_msb.cnt.write(|w| w.cnt().bits(0));
-        tim_lsb.cnt.write(|w| w.cnt().bits(0));
+        // Pause
+        tim_msb.cr1.modify(|_, w| w.cen().clear_bit());
+        tim_lsb.cr1.modify(|_, w| w.cen().clear_bit());
+        // Reset counter
+        tim_msb.cnt.reset();
+        tim_msb.cnt.reset();
+        // Continue
+        tim_msb.cr1.modify(|_, w| w.cen().set_bit());
+        tim_lsb.cr1.modify(|_, w| w.cen().set_bit());
     }
 
     fn zero() -> Self::Instant {

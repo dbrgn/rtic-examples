@@ -49,7 +49,7 @@ const APP: () = {
         let now = Instant::now();
         rprintln!("foo(scheduled = {:?}, now = {:?})", cx.scheduled, now);
         cx.schedule
-            .foo(cx.scheduled + Duration::from_cycles(6301))  // TODO: Does not work with values >6300
+            .foo(cx.scheduled + Duration::from_cycles(7800))  // TODO: Does not work with 7850 or higher
             .unwrap();
     }
 

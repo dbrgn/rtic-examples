@@ -4,7 +4,6 @@ restore_unwritten_bytes = false
 
 [default.general]
 chip = "stm32l071kbtx"
-log_level = "Info"
 
 [default.rtt]
 enabled = true
